@@ -82,6 +82,13 @@
   .total-card{text-align:right;}
   .total-card .label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;}
   .total-card .value{font-size:26px;font-weight:600;}
+  .balance-card .value{color:var(--teal);}
+  .balance-edit{
+    border:none;background:transparent;color:var(--hint);cursor:pointer;font-size:11px;
+    padding:0 0 0 5px;line-height:1;vertical-align:middle;
+  }
+  .balance-edit:hover{color:var(--ink);}
+  .cat-tab.income-tab .name{color:var(--teal);}
 
   /* ---------- layout ---------- */
   .app{max-width:1180px;margin:0 auto;padding:0 24px 100px;display:grid;grid-template-columns:220px 1fr;gap:20px;}
@@ -218,8 +225,12 @@
       <button id="nextMonth" aria-label="Mês seguinte">›</button>
     </div>
     <div class="total-card">
-      <div class="label">Total do mês</div>
+      <div class="label" id="monthTotalLabel">Total do mês</div>
       <div class="value mono" id="monthTotal">0,00 €</div>
+    </div>
+    <div class="total-card balance-card">
+      <div class="label">Saldo atual<button class="balance-edit" id="balanceEdit" aria-label="Definir saldo inicial" title="Definir saldo inicial">✎</button></div>
+      <div class="value mono" id="balanceValue">0,00 €</div>
     </div>
   </div>
 </div>
@@ -309,6 +320,49 @@
   </div>
 </div>
 
+<div class="overlay" id="incomeOverlay">
+  <div class="sheet">
+    <h3>Nova receita</h3>
+    <div class="field">
+      <label for="incName">Origem</label>
+      <input type="text" id="incName" placeholder="ex: Salário">
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label for="incAmount">Valor (€)</label>
+        <input type="number" id="incAmount" inputmode="decimal" step="0.01" min="0" placeholder="0,00">
+      </div>
+      <div class="field">
+        <label for="incDate">Data</label>
+        <input type="date" id="incDate">
+      </div>
+    </div>
+    <div class="field">
+      <label for="incNote">Nota (opcional)</label>
+      <input type="text" id="incNote" placeholder="ex: mês de julho">
+    </div>
+    <div class="sheet-actions">
+      <button class="btn ghost" id="incCancel">Cancelar</button>
+      <button class="btn primary" id="incSave">Guardar receita</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="balanceOverlay">
+  <div class="sheet">
+    <h3>Saldo inicial</h3>
+    <div class="hint-text">O saldo atual é calculado a partir deste valor, mais todas as receitas e menos todas as despesas registadas.</div>
+    <div class="field">
+      <label for="initialBalanceInput">Saldo inicial (€)</label>
+      <input type="number" id="initialBalanceInput" inputmode="decimal" step="0.01" placeholder="0,00">
+    </div>
+    <div class="sheet-actions">
+      <button class="btn ghost" id="balanceCancel">Cancelar</button>
+      <button class="btn primary" id="balanceSave">Guardar</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -347,7 +401,9 @@
         {id:"diversos", name:"Diversos"}
       ]}
     ],
-    expenses: []
+    expenses: [],
+    incomes: [],
+    initialBalance: 0
   };
 
   const PALETTE = [
@@ -370,6 +426,7 @@
 
   let state = null;
   let currentCatId = null;
+  let currentView = 'despesas'; // 'despesas' | 'receitas'
   let viewDate = new Date();
   viewDate.setDate(1);
 
@@ -377,18 +434,20 @@
 
   async function loadState(){
     try{
-      const res = await localStorage.storage.get('app-data', false);
-      state = res && res.value ? JSON.parse(res.value) : JSON.parse(JSON.stringify(DEFAULT_DATA));
+      const raw = localStorage.getItem('app-data');
+      state = raw ? JSON.parse(raw) : JSON.parse(JSON.stringify(DEFAULT_DATA));
     }catch(e){
       state = JSON.parse(JSON.stringify(DEFAULT_DATA));
     }
     if(!state.categories || !state.categories.length){ state = JSON.parse(JSON.stringify(DEFAULT_DATA)); }
+    if(!Array.isArray(state.incomes)) state.incomes = [];
+    if(typeof state.initialBalance !== 'number' || isNaN(state.initialBalance)) state.initialBalance = 0;
     currentCatId = state.categories[0].id;
   }
 
   async function saveState(){
     try{
-      await localStorage.storage.set('app-data', JSON.stringify(state), false);
+      localStorage.setItem('app-data', JSON.stringify(state));
     }catch(e){
       showToast("Não foi possível guardar. Tente novamente.");
     }
@@ -408,6 +467,15 @@
     return state.expenses.filter(e => e.date && e.date.slice(0,7) === key);
   }
 
+  function incomesInMonth(){
+    const key = monthKey(viewDate);
+    return state.incomes.filter(i => i.date && i.date.slice(0,7) === key);
+  }
+
+  function totalIncomesAll(){ return state.incomes.reduce((s,i)=>s+i.amount,0); }
+  function totalExpensesAll(){ return state.expenses.reduce((s,e)=>s+e.amount,0); }
+  function currentBalance(){ return state.initialBalance + totalIncomesAll() - totalExpensesAll(); }
+
   function catTotal(catId, list){
     return list.filter(e=>e.categoryId===catId).reduce((s,e)=>s+e.amount,0);
   }
@@ -424,12 +492,20 @@
     const list = expensesInMonth();
     const sb = $('sidebar');
     sb.innerHTML = '';
+
+    const incBtn = document.createElement('button');
+    incBtn.className = 'cat-tab income-tab' + (currentView==='receitas' ? ' active' : '');
+    const incTotal = incomesInMonth().reduce((s,i)=>s+i.amount,0);
+    incBtn.innerHTML = `<span class="name">💰 Receitas</span><span class="amt mono">${fmt(incTotal)}</span>`;
+    incBtn.addEventListener('click', ()=>{ currentView = 'receitas'; renderAll(); });
+    sb.appendChild(incBtn);
+
     state.categories.forEach(cat=>{
       const btn = document.createElement('button');
-      btn.className = 'cat-tab' + (cat.id===currentCatId ? ' active' : '');
+      btn.className = 'cat-tab' + (currentView==='despesas' && cat.id===currentCatId ? ' active' : '');
       const total = catTotal(cat.id, list);
       btn.innerHTML = `<span class="name">${escapeHtml(cat.name)}</span><span class="amt mono">${fmt(total)}</span>`;
-      btn.addEventListener('click', ()=>{ currentCatId = cat.id; renderAll(); });
+      btn.addEventListener('click', ()=>{ currentView = 'despesas'; currentCatId = cat.id; renderAll(); });
       sb.appendChild(btn);
     });
     const addBtn = document.createElement('button');
@@ -533,17 +609,69 @@
   }
 
   function renderMonthTotal(){
-    const list = expensesInMonth();
+    const list = currentView === 'receitas' ? incomesInMonth() : expensesInMonth();
     const total = list.reduce((s,e)=>s+e.amount,0);
+    $('monthTotalLabel').textContent = currentView === 'receitas' ? 'Receitas do mês' : 'Total do mês';
     $('monthTotal').textContent = fmt(total);
+  }
+
+  function renderBalance(){
+    $('balanceValue').textContent = fmt(currentBalance());
+  }
+
+  function renderIncomeHeader(){
+    const list = incomesInMonth();
+    const total = list.reduce((s,i)=>s+i.amount,0);
+    $('catTitle').textContent = 'Receitas';
+    $('catSub').textContent = fmt(total) + ' este mês';
+  }
+
+  function renderIncomeList(){
+    const list = incomesInMonth().slice().sort((a,b)=> b.date.localeCompare(a.date));
+    const wrap = $('txnList');
+    wrap.innerHTML = '';
+    if(!list.length){
+      wrap.innerHTML = `<div class="empty-state">Ainda não há receitas registadas este mês. Toque em + para adicionar a primeira.</div>`;
+      return;
+    }
+    list.forEach(inc=>{
+      const row = document.createElement('div');
+      row.className = 'txn-row';
+      const d = new Date(inc.date+'T00:00:00');
+      const dateStr = d.toLocaleDateString('pt-PT', {day:'2-digit', month:'short'});
+      row.innerHTML = `
+        <span class="txn-dot" style="background:var(--teal)"></span>
+        <div class="txn-info">
+          <div class="txn-sub">${escapeHtml(inc.name || 'Receita')}</div>
+          ${inc.note ? `<div class="txn-note">${escapeHtml(inc.note)}</div>` : ''}
+        </div>
+        <div class="txn-date">${dateStr}</div>
+        <div class="txn-amt mono" style="color:var(--teal)">+${fmt(inc.amount)}</div>
+        <button class="txn-del" aria-label="Eliminar receita" title="Eliminar">×</button>
+      `;
+      row.querySelector('.txn-del').addEventListener('click', ()=> removeIncome(inc.id));
+      wrap.appendChild(row);
+    });
+  }
+
+  function renderMain(){
+    if(currentView === 'receitas'){
+      $('gaugeGrid').style.display = 'none';
+      renderIncomeHeader();
+      renderIncomeList();
+    } else {
+      $('gaugeGrid').style.display = '';
+      renderGauges();
+      renderTransactions();
+    }
   }
 
   function renderAll(){
     renderMonthLabel();
     renderSidebar();
-    renderGauges();
-    renderTransactions();
+    renderMain();
     renderMonthTotal();
+    renderBalance();
   }
 
   function openOverlay(id, after){
@@ -612,6 +740,39 @@
     renderAll();
   }
 
+  function openIncomeModal(){
+    $('incName').value = '';
+    $('incAmount').value = '';
+    $('incNote').value = '';
+    const today = new Date();
+    $('incDate').value = today.toISOString().slice(0,10);
+    openOverlay('incomeOverlay', ()=>$('incName').focus());
+  }
+
+  async function addIncome(){
+    const name = $('incName').value.trim();
+    const amount = parseFloat(($('incAmount').value || '0').replace(',','.'));
+    const date = $('incDate').value;
+    const note = $('incNote').value.trim();
+    if(!name){ showToast('Indique a origem da receita.'); return; }
+    if(!amount || amount <= 0){ showToast('Indique um valor válido.'); return; }
+    if(!date){ showToast('Escolha uma data.'); return; }
+    state.incomes.push({id:uid(), name, amount, date, note, createdAt:Date.now()});
+    if(date.slice(0,7) !== monthKey(viewDate)){
+      viewDate = new Date(date+'T00:00:00'); viewDate.setDate(1);
+    }
+    await saveState();
+    closeOverlay('incomeOverlay');
+    renderAll();
+    showToast('Receita guardada.');
+  }
+
+  async function removeIncome(id){
+    state.incomes = state.incomes.filter(i=>i.id!==id);
+    await saveState();
+    renderAll();
+  }
+
   async function removeSubcategory(catId, subId){
     const cat = state.categories.find(c=>c.id===catId);
     if(!cat) return;
@@ -648,15 +809,34 @@
     showToast('Subcategoria criada.');
   }
 
-  $('fabAdd').addEventListener('click', ()=> openExpenseModal(currentCatId, null));
+  $('fabAdd').addEventListener('click', ()=>{
+    if(currentView === 'receitas') openIncomeModal();
+    else openExpenseModal(currentCatId, null);
+  });
   $('expCancel').addEventListener('click', ()=> closeOverlay('expenseOverlay'));
   $('expSave').addEventListener('click', addExpense);
   $('catCancel').addEventListener('click', ()=> closeOverlay('catOverlay'));
   $('catSave').addEventListener('click', addCategory);
   $('subCancel').addEventListener('click', ()=> closeOverlay('subOverlay'));
   $('subSave').addEventListener('click', addSubcategory);
+  $('incCancel').addEventListener('click', ()=> closeOverlay('incomeOverlay'));
+  $('incSave').addEventListener('click', addIncome);
+  $('balanceEdit').addEventListener('click', ()=>{
+    $('initialBalanceInput').value = state.initialBalance ? String(state.initialBalance).replace('.',',') : '';
+    openOverlay('balanceOverlay', ()=>$('initialBalanceInput').focus());
+  });
+  $('balanceCancel').addEventListener('click', ()=> closeOverlay('balanceOverlay'));
+  $('balanceSave').addEventListener('click', async ()=>{
+    const val = parseFloat(($('initialBalanceInput').value || '0').replace(',','.'));
+    if(isNaN(val)){ showToast('Indique um valor válido.'); return; }
+    state.initialBalance = val;
+    await saveState();
+    closeOverlay('balanceOverlay');
+    renderAll();
+    showToast('Saldo inicial atualizado.');
+  });
 
-  [ 'expenseOverlay','catOverlay','subOverlay' ].forEach(id=>{
+  [ 'expenseOverlay','catOverlay','subOverlay','incomeOverlay','balanceOverlay' ].forEach(id=>{
     $(id).addEventListener('click', (e)=>{ if(e.target.id===id) closeOverlay(id); });
   });
 
@@ -671,7 +851,7 @@
 
   document.addEventListener('keydown', (e)=>{
     if(e.key === 'Escape'){
-      ['expenseOverlay','catOverlay','subOverlay'].forEach(closeOverlay);
+      ['expenseOverlay','catOverlay','subOverlay','incomeOverlay','balanceOverlay'].forEach(closeOverlay);
     }
   });
 
